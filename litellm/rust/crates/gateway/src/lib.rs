@@ -19,6 +19,7 @@ pub use callbacks::{
     Callbacks, Registered, Unregistrable,
     model_capacity::{self, ModelCapacity},
     parallel_request_limiter::{self, KeyLimiter},
+    spend_log::SpendLogs,
 };
 pub use error::Error;
 pub use gateway_requests::{Category, GatewayRequests};
@@ -72,6 +73,8 @@ pub(crate) fn environment_secrets(
 pub struct Inference {
     pub gateway: Arc<Gateway>,
     pub key_limiter: Arc<KeyLimiter>,
+    /// The spend log writer, `None` without a database, where the proxy writes no spend log.
+    pub spend_logs: Option<Arc<SpendLogs>>,
 }
 
 /// Whether a license is set at all is all the proxy asks before it honors a reserved priority.
@@ -81,13 +84,15 @@ const LICENSE: &str = "LITELLM_LICENSE";
 /// the order the proxy registers them: the config's `callbacks`, of which only the dynamic rate
 /// limiter is built, then the proxy's own key limiter. The keys' limits and the model groups'
 /// capacity are counted in `redis`'s coordination client when there is one, and in this process's
-/// memory otherwise.
+/// memory otherwise. With a `database`, the proxy's spend log callback runs last and writes each
+/// served call's row to it.
 pub async fn build_inference(
     config: &Config,
     environment: &Environment,
     resources: &Resources,
     routing: RoutingCache,
     redis: &RedisClients,
+    database: Option<&litellm_repositories::Database>,
 ) -> Result<Inference, Error> {
     let catalog = Catalog::parse(BUNDLED_REGISTRY)?.value;
     let (router, shaping) = boot::router(config, &catalog).await?;
@@ -104,11 +109,15 @@ pub async fn build_inference(
         }));
         ModelCapacity::new(read, counters, active, router.clone())
     });
+    let (spend_log, spend_logs) = database
+        .map(|database| SpendLogs::start(database, redis, environment))
+        .unzip();
     let callbacks = Callbacks::new(
         model_capacity
             .iter()
             .map(|capacity| capacity.registered())
             .chain([key_limiter.registered()])
+            .chain(spend_log)
             .collect(),
     )?;
     let gateway = Gateway::new(
@@ -123,6 +132,7 @@ pub async fn build_inference(
     Ok(Inference {
         gateway: Arc::new(gateway),
         key_limiter,
+        spend_logs,
     })
 }
 

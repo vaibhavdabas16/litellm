@@ -22,7 +22,7 @@ use litellm_repositories::{
 use tokio::runtime::Handle;
 
 use crate::{
-    Error, Gateway, Inference, KeyLimiter, RedisClients, Resources, db,
+    Error, Gateway, Inference, KeyLimiter, RedisClients, Resources, SpendLogs, db,
     gateway_requests::GatewayRequests,
     host::{
         self, NativeRows,
@@ -44,6 +44,9 @@ pub struct AppState {
     /// The proxy's `parallel_request_limiter_v3`, which the inference routes' callback stage runs
     /// and the limit check before the body asks.
     pub key_limiter: Arc<KeyLimiter>,
+    /// The spend log writer the inference routes' callback stage queues to, `None` without a
+    /// database.
+    pub spend_logs: Option<Arc<SpendLogs>>,
     /// The config's `environment_variables` in front of the process environment.
     pub environment: Arc<dyn Lookup + Send + Sync>,
     /// The gateway request counts the request volume middleware records. `None` without a
@@ -66,12 +69,22 @@ impl AppState {
     ) -> Result<Self, Error> {
         let redis = crate::redis::connect(config, resources).await?;
         let routing = crate::redis::routing(&redis, environment);
+        let connected = db::connect(config, &resources.secrets).await?;
+        let repositories = connected.as_ref().map(|(_, repositories)| repositories);
         let Inference {
             gateway: inference,
             key_limiter,
-        } = crate::build_inference(config, environment, resources, routing, &redis).await?;
-        let (database, connected) = db::connect(config, &resources.secrets)
-            .await?
+            spend_logs,
+        } = crate::build_inference(
+            config,
+            environment,
+            resources,
+            routing,
+            &redis,
+            repositories,
+        )
+        .await?;
+        let (database, connected) = connected
             .map(|(pools, repositories)| {
                 let requests = Arc::new(GatewayRequests::new());
                 let flush = gateway_requests_flush(
@@ -93,6 +106,7 @@ impl AppState {
             keys,
             entitlements,
             key_limiter,
+            spend_logs,
             environment: resources.environment.clone(),
             gateway_requests,
             gateway_requests_flush,
@@ -105,8 +119,12 @@ impl AppState {
         host::auth::auth(config, self.keys.clone())
     }
 
-    /// Writes the gateway request counts still in memory, then closes the database pools.
+    /// Drains the spend logs still queued, writes the gateway request counts still in memory,
+    /// then closes the database pools.
     pub async fn close(&self) {
+        if let Some(spend_logs) = &self.spend_logs {
+            spend_logs.drain().await;
+        }
         if let Some(flush) = &self.gateway_requests_flush {
             flush.close().await;
         }
