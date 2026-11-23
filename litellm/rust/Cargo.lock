@@ -4129,6 +4129,8 @@ dependencies = [
  "litellm-callbacks",
  "litellm-callbacks-model-capacity",
  "litellm-callbacks-parallel-request-limiter",
+ "litellm-callbacks-spend-log",
+ "litellm-callbacks-spend-logger",
  "litellm-circuit-breaker",
  "litellm-config",
  "litellm-config-load",
@@ -4151,6 +4153,7 @@ dependencies = [
  "litellm-llms-types",
  "litellm-model-catalog",
  "litellm-python-compat",
+ "litellm-redaction",
  "litellm-redis-client",
  "litellm-redis-connect",
  "litellm-redis-resolve",
@@ -4296,6 +4299,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 

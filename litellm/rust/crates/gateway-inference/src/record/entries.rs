@@ -62,6 +62,8 @@ pub struct Charged {
 pub struct CallState {
     call_type: Option<CallType>,
     call_id: Option<String>,
+    /// Python's `litellm_trace_id`, which groups the call's spend log row as its session.
+    trace_id: String,
     charged: Charged,
     start: SystemTime,
     /// When the pre-call hook handed the body back for routing, Python's `api_call_start_time`.
@@ -85,6 +87,7 @@ impl CallState {
         Self {
             call_type: None,
             call_id: None,
+            trace_id: uuid::Uuid::new_v4().to_string(),
             charged: Charged::default(),
             start: SystemTime::now(),
             api_call_start: None,
@@ -116,6 +119,10 @@ impl CallState {
 
     pub fn call_id(&self) -> Option<&str> {
         self.call_id.as_deref()
+    }
+
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
     }
 
     /// Who the call is charged to, which the callbacks name once they begin.
