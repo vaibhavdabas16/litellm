@@ -4185,6 +4185,18 @@ def test_proxy_admin_viewer_can_change_own_password():
 
 
 @pytest.mark.parametrize(
+    "role",
+    (
+        LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY,
+        LitellmUserRoles.INTERNAL_USER,
+        LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
+    ),
+)
+def test_non_admin_can_restore_their_own_dashboard_session(role: LitellmUserRoles) -> None:
+    assert _internal_user_check("/session/sync", "POST", role=role) is None
+
+
+@pytest.mark.parametrize(
     "user_role",
     [
         LitellmUserRoles.INTERNAL_USER.value,

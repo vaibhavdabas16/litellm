@@ -16833,6 +16833,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/session/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sync Session Cookie
+         * @description Restore the browser cookie for an existing dashboard session without renewing it.
+         */
+        post: operations["sync_session_cookie_session_sync_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/settings": {
         parameters: {
             query?: never;
@@ -49979,6 +49999,23 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** SessionSyncRequest */
+        SessionSyncRequest: {
+            /**
+             * Token
+             * Format: password
+             * @description The signed dashboard JWT for the authenticated UI session.
+             */
+            token: string;
+        };
+        /** SessionSyncResponse */
+        SessionSyncResponse: {
+            /**
+             * Expires At
+             * @description The existing session's expiration as a Unix timestamp, without renewal.
+             */
+            expires_at: number;
+        };
         /**
          * ShadowEvalGradePair
          * @description How many judged turns gave the real and shadow responses this pair of grades.
@@ -81350,6 +81387,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionLogoutResponse"];
+                };
+            };
+        };
+    };
+    sync_session_cookie_session_sync_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionSyncRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSyncResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

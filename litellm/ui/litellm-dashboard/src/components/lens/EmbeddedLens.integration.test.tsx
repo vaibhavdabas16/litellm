@@ -8,20 +8,54 @@ import { GatewayLensNavigation, GatewayLensNavigationProvider } from "./GatewayL
 import { SidebarProvider } from "@/components/ui/sidebar";
 
 const network = vi.fn<typeof fetch>();
+const sessionSync = vi.fn<typeof fetch>();
+const dashboardToken = "saved-dashboard-session";
 const connection = (configured = true, connected = true, browserUrl = "https://lens.example.test") =>
   Response.json({ configured, connected, browser_url: browserUrl });
 
 beforeEach(() => {
   network.mockReset();
-  vi.stubGlobal("fetch", network);
+  sessionSync.mockReset().mockResolvedValue(Response.json({ expires_at: 1795632919 }));
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+    input instanceof Request && new URL(input.url).pathname === "/session/sync"
+      ? sessionSync(input, init)
+      : network(input, init),
+  );
   window.history.replaceState(null, "", "/ui/lens/?tab=traces");
+  sessionStorage.setItem("token", dashboardToken);
+  document.cookie = "token=; Max-Age=0; Path=/ui";
+  document.cookie = "token=; Max-Age=0; Path=/";
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  sessionStorage.removeItem("token");
+  document.cookie = "token=; Max-Age=0; Path=/ui";
 });
 
 const render = () => renderWithProviders(<EmbeddedLens />);
+
+it("restores the saved dashboard session before the Lens frame can make cookie-authenticated requests", async () => {
+  let finishSync!: (response: Response) => void;
+  sessionSync.mockImplementation(() => new Promise((resolve) => (finishSync = resolve)));
+  network.mockResolvedValueOnce(connection()).mockResolvedValueOnce(new Response("<html></html>"));
+  render();
+  await vi.waitFor(() => expect(sessionSync).toHaveBeenCalledOnce());
+  const request = sessionSync.mock.calls[0][0] as Request;
+  expect(await request.json()).toEqual({ token: dashboardToken });
+  expect(request.credentials).toBe("include");
+  expect(screen.queryByTitle("Lens")).not.toBeInTheDocument();
+  await act(async () => finishSync(Response.json({ expires_at: 1795632919 })));
+  expect(await screen.findByTitle("Lens")).toBeVisible();
+});
+
+it("keeps a revoked or failed session out of the Lens frame", async () => {
+  network.mockResolvedValueOnce(connection());
+  sessionSync.mockResolvedValueOnce(Response.json({ detail: "Invalid session" }, { status: 401 }));
+  render();
+  expect(await screen.findByRole("heading", { name: "Could not connect to Lens" })).toBeVisible();
+  expect(screen.queryByTitle("Lens")).not.toBeInTheDocument();
+});
 
 it("frames the connected Lens at the tab in the dashboard URL", async () => {
   network.mockResolvedValueOnce(connection()).mockResolvedValueOnce(new Response("<html></html>"));

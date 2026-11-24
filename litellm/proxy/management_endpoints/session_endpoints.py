@@ -1,6 +1,7 @@
 """
-UI session revocation.
+UI session cookies and revocation.
 
+POST /session/sync restores the browser cookie without extending the session.
 POST /session/logout — revoke the UI session key this request authenticated with.
 revoke_ui_session_keys — revoke every UI session key a user holds (password writes).
 
@@ -14,10 +15,14 @@ ownership checks can reject low-privilege roles, and a self-revoke endpoint
 that takes no body cannot be aimed at other keys.
 """
 
-from typing import TYPE_CHECKING, Annotated, Final, cast
+from datetime import datetime, timezone
+from secrets import compare_digest
+from typing import TYPE_CHECKING, Annotated, Final, Literal, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import TypeAdapter
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, ValidationError
 
 from litellm._logging import verbose_proxy_logger
 from litellm.constants import UI_SESSION_TOKEN_TEAM_ID
@@ -27,8 +32,10 @@ from litellm.proxy._types import (
     LiteLLM_VerificationToken,
     SessionLogoutResponse,
     UserAPIKeyAuth,
+    hash_token,
 )
 from litellm.proxy.auth.auth_checks import delete_cache_key_objects
+from litellm.proxy.auth.ip_address_utils import IPAddressUtils
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.management_endpoints.key_management_endpoints import (  # noqa: F401  # legacy module exports
     _persist_deleted_verification_tokens,  # pyright: ignore[reportPrivateUsage,reportUnusedImport]  # backwards-compatible package export
@@ -44,6 +51,73 @@ if TYPE_CHECKING:
 router: Final = APIRouter()
 
 _TOKEN_LIST: Final = TypeAdapter(list[str])
+
+
+class SessionSyncRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    token: SecretStr = Field(description="The signed dashboard JWT for the authenticated UI session.")
+
+
+class SessionSyncResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    expires_at: int = Field(description="The existing session's expiration as a Unix timestamp, without renewal.")
+
+
+class _DashboardSessionClaims(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    user_id: str = Field(min_length=1)
+    key: str = Field(min_length=1)
+    exp: int
+    login_method: Literal["sso", "username_password"]
+    auth_header_name: str = "Authorization"
+    type: None = None
+
+
+@router.post("/session/sync", tags=["UI Session"], response_model=SessionSyncResponse)
+async def sync_session_cookie(
+    request: Request,
+    body: SessionSyncRequest,
+    user_api_key_dict: Annotated[UserAPIKeyAuth, Depends(user_api_key_auth)],
+) -> Response:
+    """Restore the browser cookie for an existing dashboard session without renewing it."""
+    from litellm.proxy.proxy_server import master_key
+
+    scheme: Final = "https" if IPAddressUtils.is_request_https(request) else "http"
+    site: Final = request.headers.get("sec-fetch-site")
+    same_origin: Final = (
+        site == "same-origin"
+        if site is not None
+        else request.headers.get("origin") == f"{scheme}://{request.headers.get('host')}"
+    )
+    if not same_origin:
+        raise HTTPException(403, "Session cookies must be restored from the LiteLLM dashboard.")
+    if not master_key or user_api_key_dict.team_id != UI_SESSION_TOKEN_TEAM_ID:
+        raise HTTPException(403, "Only UI sessions can restore a dashboard cookie.")
+    token: Final = body.token.get_secret_value()
+    try:
+        claims: Final = _DashboardSessionClaims.model_validate(
+            jwt.decode(token, master_key, algorithms=["HS256"], options={"require": ["exp"]})
+        )
+    except (jwt.InvalidTokenError, ValidationError):
+        raise HTTPException(401, "Invalid dashboard session.") from None
+    same_key: Final = hash_token(claims.key) == user_api_key_dict.token or (
+        user_api_key_dict.token == "ui-token"
+        and compare_digest(request.headers.get(claims.auth_header_name, ""), f"Bearer {claims.key}")
+    )
+    if claims.user_id != user_api_key_dict.user_id or not same_key:
+        raise HTTPException(401, "The dashboard token must belong to the authenticated session.")
+    response: Final = JSONResponse(
+        content=SessionSyncResponse(expires_at=claims.exp).model_dump(), headers={"Cache-Control": "no-store"}
+    )
+    response.set_cookie(
+        "token",
+        token,
+        expires=datetime.fromtimestamp(claims.exp, tz=timezone.utc),
+        secure=scheme == "https",
+        httponly=True,
+        samesite="lax",
+    )
+    return response
 
 
 def _error_detail(message: str) -> HTTPExceptionErrorDetail:

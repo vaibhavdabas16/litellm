@@ -2,6 +2,7 @@
 
 import { clearTokenCookies, getCookie } from "@/utils/cookieUtils";
 import { checkTokenValidity, decodeToken } from "@/utils/jwtUtils";
+import { ApiError } from "@/lib/http/client";
 import { useEffect, useMemo } from "react";
 import { effectiveSessionRole, formatUserRole, isViewOnlySessionRole, userRoleDisplayLabel } from "@/utils/roles";
 import { useCurrentUser } from "./currentUser/useCurrentUser";
@@ -19,22 +20,24 @@ const useAuthorized = () => {
     data: currentUser,
     isLoading: isCurrentUserLoading,
     isError: isCurrentUserError,
+    error: currentUserError,
   } = useCurrentUser(isTokenValid ? decoded?.key ?? null : null, decoded?.auth_header_name, !isUIConfigLoading);
   const serverRole = currentUser?.user_role ?? "";
   const isLoading = isUIConfigLoading || isCurrentUserLoading;
   const isAuthorized = isTokenValid && !uiConfig?.admin_ui_disabled && !isCurrentUserError;
+  const isSessionRejected = currentUserError instanceof ApiError && [401, 403, 404].includes(currentUserError.status);
 
   // Single useEffect for all redirect logic
   useEffect(() => {
     if (isLoading) return;
 
-    if (!isAuthorized) {
+    if (!isTokenValid || uiConfig?.admin_ui_disabled || isSessionRejected) {
       if (token) {
         clearTokenCookies();
       }
       redirectToLogin();
     }
-  }, [isLoading, isAuthorized, token]);
+  }, [isLoading, isTokenValid, uiConfig?.admin_ui_disabled, isSessionRejected, token]);
 
   return {
     isLoading,

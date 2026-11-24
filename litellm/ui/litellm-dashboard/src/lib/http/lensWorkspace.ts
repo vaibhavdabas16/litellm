@@ -1,4 +1,5 @@
 import { backgroundFetchClient } from "./api";
+import { getCookie, storeLoginToken } from "@/utils/cookieUtils";
 
 export type LensWorkspaceAvailability =
   | { state: "served" | "unconfigured" | "unavailable" }
@@ -15,6 +16,14 @@ export const lensWorkspaceAvailability = async (
     });
     if (connection?.configured === false) return { state: "unconfigured" };
     if (connection?.connected !== true) return { state: "unavailable" };
+    const token = getCookie("token");
+    if (!token) return { state: "unavailable" };
+    storeLoginToken(token);
+    await backgroundFetchClient.POST("/session/sync", {
+      signal,
+      credentials: "include",
+      body: { token },
+    });
     const response = await fetch(url, { signal, headers: { Accept: "application/json" } });
     if (response.ok) return { state: "served" };
     return response.status === 404

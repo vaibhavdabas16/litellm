@@ -1049,7 +1049,7 @@ class RouteChecks:
             return
 
         # Self-service logout; the endpoint only revokes the caller's own session key.
-        if route == "/session/logout":
+        if route in ("/session/logout", "/session/sync"):
             return
 
         if RouteChecks.is_self_scoped_credential_route(route=route, request=request):

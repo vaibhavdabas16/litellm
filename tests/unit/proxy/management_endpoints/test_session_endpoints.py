@@ -3,20 +3,160 @@ Tests for POST /session/logout and revoke_ui_session_keys
 (litellm/proxy/management_endpoints/session_endpoints.py).
 """
 
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
+from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import jwt
 import pytest
-from fastapi import HTTPException, Response
+import time_machine
+from fastapi import HTTPException, Request, Response
+from pydantic import SecretStr
 
 from litellm.constants import UI_SESSION_TOKEN_TEAM_ID
-from litellm.proxy._types import LiteLLM_VerificationToken, UserAPIKeyAuth
+from litellm.proxy._types import LiteLLM_VerificationToken, UserAPIKeyAuth, hash_token
 from litellm.proxy.management_endpoints.session_endpoints import (
+    SessionSyncRequest,
     revoke_ui_session_keys,
     session_logout,
+    sync_session_cookie,
 )
 
 HASHED_TOKEN = "hashed-session-token"
 USER_ID = "user-123"
+SIGNING_KEY: Final = "test-session-signing-key-at-least-32-characters"
+SESSION_KEY: Final = "sk-test-dashboard-session"
+SESSION_EXPIRES: Final = int(datetime(2026, 11, 25, 18, 55, 19, tzinfo=timezone.utc).timestamp())
+
+
+def _sync_request(site: str = "same-origin", headers: tuple[tuple[bytes, bytes], ...] = ()) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/session/sync",
+            "headers": ((b"host", b"gateway.example.test"), (b"sec-fetch-site", site.encode()), *headers),
+        }
+    )
+
+
+def _signed_session(**overrides: object) -> str:
+    return jwt.encode(
+        {
+            "user_id": USER_ID,
+            "key": SESSION_KEY,
+            "exp": SESSION_EXPIRES,
+            "login_method": "username_password",
+            **overrides,
+        },
+        SIGNING_KEY,
+        algorithm="HS256",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("login_method", ("username_password", "sso"))
+@time_machine.travel("2026-11-24T18:55:19Z", tick=False)
+async def test_sync_restores_the_same_session_with_its_original_expiry(login_method: str) -> None:
+    token: Final = _signed_session(login_method=login_method)
+    with patch("litellm.proxy.proxy_server.master_key", SIGNING_KEY):
+        response: Final = await sync_session_cookie(
+            _sync_request(),
+            SessionSyncRequest(token=SecretStr(token)),
+            _ui_session_caller(hash_token(SESSION_KEY)),
+        )
+    cookie: Final[SimpleCookie[str]] = SimpleCookie()
+    cookie.load(response.headers["set-cookie"])
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert cookie["token"].value == token
+    assert parsedate_to_datetime(cookie["token"]["expires"]).timestamp() == SESSION_EXPIRES
+    assert cookie["token"]["httponly"]
+    assert cookie["token"]["secure"]
+    assert cookie["token"]["samesite"] == "lax"
+    assert cookie["token"]["path"] == "/"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"exp": 0},
+        {"key": "sk-different-session"},
+        {"user_id": "different-user"},
+        {"login_method": "api_key"},
+        {"type": "byok_session"},
+    ),
+)
+@time_machine.travel("2026-11-24T18:55:19Z", tick=False)
+async def test_sync_refuses_a_token_that_does_not_represent_the_authenticated_session(
+    overrides: dict[str, object],
+) -> None:
+    with patch("litellm.proxy.proxy_server.master_key", SIGNING_KEY), pytest.raises(HTTPException) as error:
+        await sync_session_cookie(
+            _sync_request(),
+            SessionSyncRequest(token=SecretStr(_signed_session(**overrides))),
+            _ui_session_caller(hash_token(SESSION_KEY)),
+        )
+    assert error.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_sync_refuses_cross_origin_session_fixation() -> None:
+    with pytest.raises(HTTPException) as error:
+        await sync_session_cookie(
+            _sync_request("cross-site"),
+            SessionSyncRequest(token=SecretStr(_signed_session())),
+            _ui_session_caller(hash_token(SESSION_KEY)),
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "token",
+    (
+        "not-a-jwt",
+        jwt.encode({"exp": SESSION_EXPIRES}, "different-signing-key-at-least-32-characters"),
+        jwt.encode({"user_id": USER_ID, "key": SESSION_KEY, "login_method": "sso"}, SIGNING_KEY),
+    ),
+)
+@time_machine.travel("2026-11-24T18:55:19Z", tick=False)
+async def test_sync_rejects_unsigned_forged_or_unbounded_tokens(token: str) -> None:
+    with patch("litellm.proxy.proxy_server.master_key", SIGNING_KEY), pytest.raises(HTTPException) as error:
+        await sync_session_cookie(
+            _sync_request(), SessionSyncRequest(token=SecretStr(token)), _ui_session_caller(hash_token(SESSION_KEY))
+        )
+    assert error.value.status_code == 401
+
+
+@pytest.mark.asyncio
+@time_machine.travel("2026-11-24T18:55:19Z", tick=False)
+async def test_sync_cannot_turn_an_api_key_into_a_dashboard_cookie() -> None:
+    with patch("litellm.proxy.proxy_server.master_key", SIGNING_KEY), pytest.raises(HTTPException) as error:
+        await sync_session_cookie(
+            _sync_request(),
+            SessionSyncRequest(token=SecretStr(_signed_session())),
+            UserAPIKeyAuth(token=hash_token(SESSION_KEY), user_id=USER_ID),
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+@time_machine.travel("2026-11-24T18:55:19Z", tick=False)
+async def test_sync_preserves_experimental_sessions_using_their_authenticated_custom_header() -> None:
+    token: Final = _signed_session(key="encrypted-session", auth_header_name="X-Session-Key")
+    with patch("litellm.proxy.proxy_server.master_key", SIGNING_KEY):
+        response: Final = await sync_session_cookie(
+            _sync_request(headers=((b"x-session-key", b"Bearer encrypted-session"),)),
+            SessionSyncRequest(token=SecretStr(token)),
+            _ui_session_caller("ui-token"),
+        )
+    assert response.status_code == 200
+    assert f"token={token}" in response.headers["set-cookie"]
 
 
 def _session_row(token: str = HASHED_TOKEN, user_id: str = USER_ID) -> LiteLLM_VerificationToken:

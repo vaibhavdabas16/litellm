@@ -504,10 +504,10 @@ describe("useAuthorized", () => {
       expect(currentUserRequests()).toHaveLength(1);
     });
 
-    it("clears the cookie and redirects to login when the current user cannot be loaded", async () => {
+    it.each([401, 403, 404])("clears the cookie when the server rejects the session with %s", async (status) => {
       getUiConfigMock.mockResolvedValue(uiConfig);
       setSessionCookie({ key: "orphan-key", user_id: "u-1", user_role: "internal_user" });
-      failCurrentUser(404);
+      failCurrentUser(status);
 
       renderHook(() => useAuthorized(), { wrapper });
 
@@ -519,6 +519,21 @@ describe("useAuthorized", () => {
       );
       expect(clearTokenCookiesMock).toHaveBeenCalled();
       expect(currentUserRequests()).toHaveLength(2);
+    });
+
+    it("retains the session when the identity service is temporarily unavailable", async () => {
+      getUiConfigMock.mockResolvedValue(uiConfig);
+      const token = setSessionCookie({ key: "valid-key", user_id: "u-1", user_role: "internal_user" });
+      failCurrentUser(503);
+
+      const { result } = renderHook(() => useAuthorized(), { wrapper });
+
+      await waitFor(() => expect(currentUserRequests()).toHaveLength(2), { timeout: 4000 });
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(result.current.isAuthorized).toBe(false);
+      expect(clearTokenCookiesMock).not.toHaveBeenCalled();
+      expect(replaceMock).not.toHaveBeenCalled();
+      expect(document.cookie).toContain(token);
     });
 
     it("refetches the identity when a different session key logs in", async () => {
