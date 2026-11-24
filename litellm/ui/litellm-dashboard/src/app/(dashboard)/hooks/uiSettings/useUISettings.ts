@@ -1,4 +1,5 @@
 import { getProxyBaseUrl, getUiSettings } from "@/components/networking";
+import { useControlPlane } from "@/contexts/ControlPlaneContext";
 import { useQuery } from "@tanstack/react-query";
 import { createQueryKeys } from "../common/queryKeysFactory";
 
@@ -30,6 +31,7 @@ type UISettings = {
  * so a caller that needs to notice a change also has to poll.
  */
 export const useUISettings = (options?: { staleTime?: number; refetchInterval?: number; enabled?: boolean }) => {
+  const controlPlane = useControlPlane();
   const proxyBaseUrl = getProxyBaseUrl();
   return useQuery<UISettings>({
     queryKey: [...uiSettingsKeys.list({}), proxyBaseUrl],
@@ -37,6 +39,6 @@ export const useUISettings = (options?: { staleTime?: number; refetchInterval?: 
     staleTime: options?.staleTime ?? 60 * 60 * 1000, // 1 hour - data rarely changes
     gcTime: 60 * 60 * 1000, // 1 hour - keep in cache for 1 hour
     refetchInterval: options?.refetchInterval,
-    enabled: options?.enabled,
+    enabled: !controlPlane && options?.enabled !== false,
   });
 };

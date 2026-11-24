@@ -88,6 +88,11 @@ def test_safe_health_routes_are_allowed(path: str) -> None:
     assert decide(path) == Allowed(path)
 
 
+@pytest.mark.parametrize("path", ["/public/providers", "/public/providers/fields/extra", "/public/model_hub/info"])
+def test_other_public_routes_are_not_proxied(path: str) -> None:
+    assert isinstance(decide(path, is_read=True), Denied)
+
+
 @pytest.mark.parametrize("version", ["", "/v1", "/v2", "/v12"])
 @pytest.mark.parametrize("route", ["/key/service-account/generate", "/guardrails/apply_guardrail"])
 @pytest.mark.parametrize("suffix", ["", "/", "/child"])
